@@ -5,7 +5,7 @@ name: Build coalwater's keyboard
 on:
   push:
     branches:
-      - master
+      - cirque
 
 jobs:
   build:
