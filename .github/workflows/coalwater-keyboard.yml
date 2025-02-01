@@ -13,11 +13,10 @@ jobs:
     secrets: inherit
     with:
       board: '["nice_nano_v2"]'
-      shield: '["splitkb_aurora_corne_left nice_view_adapter nice_view","splitkb_aurora_corne_right"]'
+      shield: '["splitkb_aurora_corne_left nice_view_adapter nice_view", "splitkb_aurora_corne_right"]'
       alphas: '["QWERTY"]'
       nav: '["vi"]'
       clipboard: '["default"]'
       layers: '["default"]'
       mapping: '["default"]'
       custom_config: '["default"]'
-      kconfig: '["CONFIG_ZMK_SLEEP=y\nCONFIG_ZMK_IDLE_SLEEP_TIMEOUT=7200000\nCONFIG_BT_CTLR_TX_PWR_PLUS_8=y\nCONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING=y\nCONFIG_ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_PROXY=y"]'
