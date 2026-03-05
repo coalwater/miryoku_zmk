@@ -1,0 +1,7 @@
+/*
+ * Disable RGB underglow SPI3 which uses P0.06 as MOSI,
+ * conflicting with the nice_view_adapter CS pin (also P0.06).
+ */
+&spi3 {
+    status = "disabled";
+};
