@@ -20,3 +20,4 @@ jobs:
       layers: '["default"]'
       mapping: '["default"]'
       custom_config: '["default"]'
+      branches: '["zmkfirmware/zmk/v0.3-branch"]'
