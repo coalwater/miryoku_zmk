@@ -20,6 +20,9 @@
 #             build dies with "SERIAL_HAS_DRIVER ... value n". The snippet
 #             adds the cdc-acm DT node and the zephyr,console chosen.)
 #   PRISTINE set to 1 to force a full reconfigure
+#   EXTRA_OVERLAY  path to a .overlay applied LAST (after every shield overlay).
+#            Needed to override a shield: a config-repo <shield>.overlay is
+#            applied BEFORE the shield overlays, so it can only add nodes.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,7 +37,7 @@ SHIELD="${1:?usage: local-build.sh \"<shield ...>\"}"
 
 : "${ALPHAS:=QWERTY}" "${NAV:=vi}"
 : "${EXTRA:=}" "${TAP:=}" "${CLIPBOARD:=}" "${LAYERS:=}" "${MAPPING:=}"
-: "${KCONFIG:=}" "${SNIPPET:=}"
+: "${KCONFIG:=}" "${SNIPPET:=}" "${EXTRA_OVERLAY:=}"
 
 [ -d "$WS/zmk/zephyr" ] || { echo "no zmk workspace at $WS - run tools/local-setup.sh first" >&2; exit 1; }
 
@@ -83,8 +86,11 @@ pristine_arg=""
 [ "${PRISTINE:-0}" = 1 ] && pristine_arg="-p"
 
 cd "$WS/zmk/app"
+extra_overlay_arg=""
+[ -n "$EXTRA_OVERLAY" ] && extra_overlay_arg="-DEXTRA_DTC_OVERLAY_FILE=$EXTRA_OVERLAY"
+
 west build $pristine_arg $snippet_arg -b "$BOARD" -d "$build" -- \
-  -DSHIELD="$SHIELD" -DZMK_CONFIG="$stage/config"
+  -DSHIELD="$SHIELD" -DZMK_CONFIG="$stage/config" $extra_overlay_arg
 
 out="${OUT_DIR:-$WS/out}"
 mkdir -p "$out"
