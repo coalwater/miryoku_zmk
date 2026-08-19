@@ -46,6 +46,18 @@
         dr-gpios = <&gpio0 6 (GPIO_ACTIVE_HIGH)>;
 
         sensitivity = "1x";
+
+        /* Pad is mounted upside down relative to the sensor's own axes. This is
+         * a chip-level flip (FEED_CFG1 INV_Y), not a ZMK input processor, so it
+         * costs nothing and needs no change on the dongle. */
+        y-invert;
+
+        /* TEST VALUES (module defaults are 5 / 4). Raising the wide-Z minimums
+         * makes the sensor ignore very light contact, which is what produces
+         * bogus deltas as a finger lands or lifts. Dial back if light touches
+         * start getting missed. */
+        x-axis-z-min = <12>;
+        y-axis-z-min = <12>;
         // sleep;
         // no-taps;
     };
