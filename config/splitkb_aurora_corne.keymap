@@ -4,3 +4,19 @@
 #include "../miryoku/custom_config.h"
 #include "../miryoku/mapping/42/corne.h"
 #include "../miryoku/miryoku.dtsi"
+
+/*
+ * SPIM3 (RGB underglow, from splitkb_aurora_corne/boards/nice_nano_v2.overlay)
+ * drives MOSI on P0.06, which is also the nice!view chip-select pin:
+ * nice_view_adapter sets cs-gpios = <&pro_micro 1>, and arduino_pro_micro_pins.dtsi
+ * maps D1 to gpio0 pin 6. Two owners of one pad hangs the left half at boot as
+ * soon as the display shields are in the SHIELD list.
+ *
+ * This override has to live in the keymap, NOT in splitkb_aurora_corne_left.overlay:
+ * a ZMK config-repo overlay is applied BEFORE every shield overlay, so it can only
+ * add nodes and the shield always wins afterwards. The keymap is the only
+ * config-repo file applied after the shields. No underglow LEDs are installed.
+ */
+&spi3 {
+    status = "disabled";
+};
