@@ -23,6 +23,10 @@
 #   EXTRA_OVERLAY  path to a .overlay applied LAST (after every shield overlay).
 #            Needed to override a shield: a config-repo <shield>.overlay is
 #            applied BEFORE the shield overlays, so it can only add nodes.
+#   MODULES  space-separated user/repo/branch ZMK modules, cloned into
+#            $ZMK_WS/modules/ and passed as -DZMK_EXTRA_MODULES. Same spelling
+#            the `modules:` input of .github/workflows/main.yml takes, e.g.
+#            MODULES=petejohanson/cirque-input-module/main
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,7 +41,7 @@ SHIELD="${1:?usage: local-build.sh \"<shield ...>\"}"
 
 : "${ALPHAS:=QWERTY}" "${NAV:=vi}"
 : "${EXTRA:=}" "${TAP:=}" "${CLIPBOARD:=}" "${LAYERS:=}" "${MAPPING:=}"
-: "${KCONFIG:=}" "${SNIPPET:=}" "${EXTRA_OVERLAY:=}"
+: "${KCONFIG:=}" "${SNIPPET:=}" "${EXTRA_OVERLAY:=}" "${MODULES:=}"
 
 [ -d "$WS/zmk/zephyr" ] || { echo "no zmk workspace at $WS - run tools/local-setup.sh first" >&2; exit 1; }
 
@@ -80,6 +84,20 @@ if [ -n "$KCONFIG" ]; then
   printf '%b\n' "$KCONFIG" | sed 's/^/   /'
 fi
 
+# Out-of-tree ZMK modules, cloned the same way main.yml does it.
+module_dirs=""
+for m in $MODULES; do
+  user="$(echo "$m" | cut -f 1 -d /)"
+  repo="$(echo "$m" | cut -f 2 -d /)"
+  branch="$(echo "$m" | cut -f 3- -d /)"
+  d="$WS/modules/$user-$repo-$(echo "$branch" | tr / _)"
+  [ -d "$d" ] || git clone -b "$branch" --depth 1 "https://github.com/$user/$repo.git" "$d"
+  module_dirs="$module_dirs$d;"
+  slug="$slug-$repo"
+done
+modules_arg=""
+[ -n "$module_dirs" ] && modules_arg="-DZMK_EXTRA_MODULES=$module_dirs"
+
 build="$WS/build/$slug"
 
 pristine_arg=""
@@ -90,7 +108,7 @@ extra_overlay_arg=""
 [ -n "$EXTRA_OVERLAY" ] && extra_overlay_arg="-DEXTRA_DTC_OVERLAY_FILE=$EXTRA_OVERLAY"
 
 west build $pristine_arg $snippet_arg -b "$BOARD" -d "$build" -- \
-  -DSHIELD="$SHIELD" -DZMK_CONFIG="$stage/config" $extra_overlay_arg
+  -DSHIELD="$SHIELD" -DZMK_CONFIG="$stage/config" $modules_arg $extra_overlay_arg
 
 out="${OUT_DIR:-$WS/out}"
 mkdir -p "$out"

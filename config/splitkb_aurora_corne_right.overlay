@@ -4,6 +4,6 @@
     status = "okay";
 };
 
-&glidepoint_listener {
+&glidepoint_split {
     status = "okay";
 };

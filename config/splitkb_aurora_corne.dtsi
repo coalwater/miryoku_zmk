@@ -1,22 +1,48 @@
+/*
+ * Cirque Pinnacle trackpad on the right half (I2C0, addr 0x2a).
+ *
+ * The right half is a split *peripheral* now (the dongle is the central), so
+ * this side must NOT own a zmk,input-listener - a listener feeds the keymap-side
+ * pointing behaviours and only the central runs a keymap. Instead the trackpad
+ * is wrapped in a zmk,input-split node, which forwards raw input events over the
+ * split link tagged with its `reg`. The dongle declares a matching
+ * zmk,input-split with the same reg, plus the listener.
+ * See app/src/pointing/input_split.c: the peripheral branch requires `device`,
+ * the central branch matches incoming events on `reg` alone.
+ *
+ * The driver is not in ZMK - it comes from the out-of-tree module
+ * petejohanson/cirque-input-module (the modules: input in the workflow).
+ */
+
 #include <input/processors.dtsi>
 
 / {
-    // Enable Pointer Input Processing
-    glidepoint_listener: glidepoint_listener {
-      compatible = "zmk,input-listener";
-      status = "okay";
-      device = <&glidepoint>;
+    splits {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        glidepoint_split: glidepoint_split@0 {
+            compatible = "zmk,input-split";
+            reg = <0>;
+            status = "okay";
+            device = <&glidepoint>;
+        };
     };
 };
 
-// Configure I2C Bus for Nice!Nano
 &i2c0 {
-    status = "okay"; // Ensure I2C is enabled
+    status = "okay";
 
     glidepoint: glidepoint@2a {
         compatible = "cirque,pinnacle";
         reg = <0x2a>;
         status = "okay";
+
+        /*
+         * D1 = P0.06, which is also spi3 (RGB underglow) MOSI - see the &spi3
+         * disable in splitkb_aurora_corne.keymap, without which this pad has
+         * two owners.
+         */
         dr-gpios = <&gpio0 6 (GPIO_ACTIVE_HIGH)>;
 
         sensitivity = "1x";

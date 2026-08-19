@@ -11,6 +11,8 @@
 
 #include <dt-bindings/zmk/matrix_transform.h>
 
+#include <input/processors.dtsi>
+
 #include <layouts/foostan/corne/5column.dtsi>
 #include <layouts/foostan/corne/6column.dtsi>
 
@@ -26,6 +28,31 @@
     chosen {
         zmk,kscan = &dongle_kscan;
         zmk,physical-layout = &foostan_corne_6col_layout;
+    };
+
+    /*
+     * Central half of the Cirque trackpad plumbing. The pad itself lives on the
+     * right half, which forwards its raw input events over the split link
+     * tagged with reg = 0 (config/splitkb_aurora_corne.dtsi). This side needs a
+     * zmk,input-split with the *same* reg to receive them - no `device`, it is
+     * the sink, not the source - and the listener that turns them into pointer
+     * behaviours against the keymap.
+     */
+    splits {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        glidepoint_split: glidepoint_split@0 {
+            compatible = "zmk,input-split";
+            reg = <0>;
+            status = "okay";
+        };
+    };
+
+    glidepoint_listener: glidepoint_listener {
+        compatible = "zmk,input-listener";
+        status = "okay";
+        device = <&glidepoint_split>;
     };
 
     /* No physical matrix on the dongle. */

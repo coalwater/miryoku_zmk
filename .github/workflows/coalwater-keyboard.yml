@@ -21,3 +21,7 @@ jobs:
       mapping: '["default"]'
       custom_config: '["default"]'
       branches: '["zmkfirmware/zmk/v0.3-branch"]'
+      # Cirque Pinnacle driver for the right half's trackpad. ZMK has no
+      # cirque,pinnacle driver in tree, so without this module the devicetree
+      # node resolves to nothing and the pad is silent.
+      modules: '["petejohanson/cirque-input-module/main"]'
