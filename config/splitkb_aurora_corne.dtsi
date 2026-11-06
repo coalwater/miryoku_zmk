@@ -1,0 +1,193 @@
+/*
+ * Cirque Pinnacle trackpad on the right half (I2C0, addr 0x2a).
+ *
+ * The right half is a split *peripheral* now (the dongle is the central), so
+ * this side must NOT own a zmk,input-listener - a listener feeds the keymap-side
+ * pointing behaviours and only the central runs a keymap. Instead the trackpad
+ * is wrapped in a zmk,input-split node, which forwards raw input events over the
+ * split link tagged with its `reg`. The dongle declares a matching
+ * zmk,input-split with the same reg, plus the listener.
+ * See app/src/pointing/input_split.c: the peripheral branch requires `device`,
+ * the central branch matches incoming events on `reg` alone.
+ *
+ * The driver is not in ZMK - it comes from the out-of-tree module
+ * petejohanson/cirque-input-module (the modules: input in the workflow).
+ */
+
+#include <input/processors.dtsi>
+
+/ {
+    splits {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        glidepoint_split: glidepoint_split@0 {
+            compatible = "zmk,input-split";
+            reg = <0>;
+            status = "okay";
+            device = <&glidepoint>;
+        };
+    };
+};
+
+&i2c0 {
+    status = "okay";
+
+    glidepoint: glidepoint@2a {
+        compatible = "cirque,pinnacle";
+        reg = <0x2a>;
+        status = "okay";
+
+        /*
+         * D1 = P0.06, which is also spi3 (RGB underglow) MOSI - see the &spi3
+         * disable in splitkb_aurora_corne.keymap, without which this pad has
+         * two owners.
+         */
+        dr-gpios = <&gpio0 6 (GPIO_ACTIVE_HIGH)>;
+
+        /*
+         * ADC attenuation (ERA reg 0x0187, bits 7:6). "1x" is 0x00 - the LEAST
+         * attenuation, i.e. the highest front-end gain. Higher settings
+         * attenuate more and are what Cirque specifies for thicker overlays.
+         *
+         * Was "1x". At max gain the front end saturates under firm or fast
+         * contact: the position solution degrades within seconds of vigorous
+         * movement and only recovers once the finger leaves the pad and the
+         * chip's background compensation can re-baseline (~3s), which is
+         * exactly the observed behaviour. Backing the gain off one step is the
+         * direct fix for saturation; every other knob tried (z-min, GlideExtend,
+         * track-error comp, taps) sits downstream of the ADC.
+         *
+         * "3x" was tried on 2026-08-20 and is too far: it misses entire swipes,
+         * i.e. the signal is attenuated below what the tracker needs. "2x" is
+         * the setting that helped without costing sensitivity.
+         */
+        sensitivity = "2x";
+
+        /* Pad is mounted upside down relative to the sensor's own axes. This is
+         * a chip-level flip (FEED_CFG1 INV_Y), not a ZMK input processor, so it
+         * costs nothing and needs no change on the dongle. */
+        y-invert;
+
+        /* Wide-Z minimums, module defaults are 5 / 4. These set how much
+         * contact the sensor needs before it believes a touch: too low and a
+         * finger hovering above the pad already moves the pointer, too high and
+         * taps get dropped, doubled, or come out as movement, because tap
+         * detection rides on the same threshold. 12 was tried and broke clicks
+         * badly. Raise in small steps and re-test clicks every time.
+         *
+         * UNTESTED IDEA, deliberately not applied: 9/8 was chosen to stop hover
+         * pickup while the ADC was saturating at "1x". With the gain at "2x"
+         * that compensation may no longer be needed, and a needlessly high
+         * threshold costs light touches and tap reliability. The chip's own
+         * power-on values are X 6, Y 5 (read out of ERA before the driver
+         * overwrites them - note the module binding claims 5/4, which is not
+         * what this part reports). A 6/5 build exists on the shelf as
+         * right-2x-taps-glideextend-zmin65.uf2 if it is worth trying.
+         */
+        x-axis-z-min = <9>;
+        y-axis-z-min = <8>;
+
+        /*
+         * Disable Cirque's GlideExtend. It is meant to let you lift and
+         * re-place a finger mid-drag without breaking the glide, but it means a
+         * quick lift-and-land somewhere else is reported as movement from the
+         * old position to the new one - the pointer flies across the screen.
+         *
+         * NOTE: needs the patched module (upstream defines
+         * PINNACLE_FEED_CFG2_DIS_GE but never sets it and has no property).
+         *
+         * CURRENTLY OFF (GlideExtend re-enabled) on 2026-08-20. The "pointer
+         * flies across the screen on a quick lift-and-land" symptom that
+         * justified disabling it was diagnosed while the ADC was still at "1x"
+         * and saturating, same as the tap misfires - and those turned out to be
+         * a gain problem, not a feature problem. GlideExtend is worth having if
+         * it behaves: it is what lets you lift and re-place a finger without
+         * breaking a drag. Re-enable no-glide-extend if quick lift-and-land
+         * starts flinging the pointer again.
+         */
+        // no-glide-extend;
+
+        /*
+         * Disable the chip's tap engine (FEED_CFG2 DIS_TAP).
+         *
+         * The Pinnacle classifies quick contacts as taps and synthesises button
+         * events in packet[0] bits 0-2, and a tap followed immediately by
+         * contact becomes tap-drag. Under fast movement that misfires
+         * constantly: spurious clicks, and the button latching down so the pad
+         * drags instead of moves. Tap classification is a timing window, which
+         * is why the misbehaviour is speed-dependent and appears within seconds
+         * of moving frantically rather than building up gradually.
+         *
+         * Cost: no tap-to-click on the pad. Clicks come from the Mouse layer
+         * thumb keys (U_BTN1/2/3) instead. Chosen deliberately on 2026-08-20.
+         *
+         * NOT set: no-secondary-tap - it only disables the secondary (right)
+         * tap and would leave the primary tap-drag misfires in place.
+         *
+         * CURRENTLY OFF (taps re-enabled) on 2026-08-20: the tap misfires were
+         * diagnosed while the ADC was still at "1x" and saturating. Tap
+         * classification runs on that same signal, so lowering the gain to "2x"
+         * may fix the misfires at their source and make disabling taps
+         * unnecessary. Re-enable no-taps if spurious clicks or the pad dragging
+         * instead of moving come back.
+         */
+        // no-taps;
+
+        /*
+         * NOT enabled: max-delta, a clamp on single-sample deltas. It was set
+         * to 40 while the outlier samples (captured: median 7 counts, p95 25,
+         * isolated spikes to 88) were unexplained. But a clamp truncates fast
+         * swipes, so travel stops being proportional to finger speed - that
+         * showed up directly as "doesn't move with a consistent speed" on
+         * 2026-08-20. Backing the ADC gain off to "2x" removed the saturation
+         * that produced the outliers in the first place, so the clamp has
+         * nothing left to catch and only costs fast movement. Re-enable only if
+         * genuine outliers return, and then well above normal motion.
+         *
+         * NOT enabled either: no-track-error-comp. Disabling the chip's
+         * mid-stroke track-error compensation was tried on 2026-08-20 on the
+         * theory that its corrections were the source of the outlier samples;
+         * it did not help, so it was reverted rather than left in as an
+         * unverified change. Background compensation stays ON either way - that
+         * is what recovers tracking after a few seconds of no contact.
+         *
+         * NOTE: both properties need the patched module.
+         */
+        // max-delta = <40>;
+
+        /*
+         * NOT enabled: idle recalibration (recalibrate-idle-ms). The Pinnacle
+         * only calibrates at init, so a drifting baseline was a plausible cause
+         * of tracking degrading over time - but recalibrating after 3s idle
+         * made it measurably WORSE in testing on 2026-08-19, so the theory is
+         * either wrong or the cure is worse than the disease. The property
+         * exists in the patched module and defaults to 0 (off).
+         */
+        /*
+         * Let the Pinnacle sleep itself. Sets SYS_CFG EN_SLEEP at init
+         * (input_pinnacle.c:581-586); the chip then drops to low power after
+         * inactivity and wakes on contact.
+         *
+         * This is the only thing that ever powers the pad down. The driver's
+         * PM hook (input_pinnacle.c:661-670) handles PM_DEVICE_ACTION_SUSPEND
+         * by calling set_int(dev, false) and nothing else - it masks our GPIO
+         * interrupt but never touches the chip. So without this property the
+         * pad keeps scanning at full rate even after ZMK deep-sleeps the
+         * nRF at CONFIG_ZMK_IDLE_SLEEP_TIMEOUT, i.e. it draws 24/7 whether or
+         * not the keyboard is in use. That is a drain no idle timeout can fix.
+         *
+         * Tried bare on 2026-09-09 and reverted: the pad stopped responding.
+         * Upstream writes SLEEP_INTERVAL = 255 unconditionally at init, which
+         * is how often the sleeping chip wakes to look for a finger. The
+         * patched module only writes it when sleep-interval is set, so the
+         * chip keeps its power-on value (Cirque documents ~300 ms wake from
+         * sleep, entered after 5 s without a touch). The power-on value is
+         * logged as "PINNACLE SLEEP_INTERVAL after reset" on a USB-logging
+         * build. If first touch after a pause still feels laggy, set
+         * sleep-interval below that value.
+         */
+        sleep;
+        // no-taps;
+    };
+};

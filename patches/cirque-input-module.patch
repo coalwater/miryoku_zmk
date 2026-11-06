@@ -1,0 +1,315 @@
+diff --git a/drivers/input/input_pinnacle.c b/drivers/input/input_pinnacle.c
+index d5c7416..462e668 100644
+--- a/drivers/input/input_pinnacle.c
++++ b/drivers/input/input_pinnacle.c
+@@ -284,12 +284,68 @@ static void pinnacle_report_data(const struct device *dev) {
+ 
+     data->btn_cache = btn;
+ 
++    /* Clamp absurd single-sample deltas. The pad occasionally emits one sample
++     * an order of magnitude larger than its neighbours; the host's pointer
++     * acceleration curve turns that into a screen-wide fling. Normal motion is
++     * well under this, so the clamp is inert until something goes wrong. */
++    if (config->max_delta > 0) {
++        const int8_t lim = (int8_t)config->max_delta;
++        if (dx > lim || dx < -lim || dy > lim || dy < -lim) {
++            LOG_DBG("Clamping outlier delta %d,%d", dx, dy);
++        }
++        dx = CLAMP(dx, -lim, lim);
++        dy = CLAMP(dy, -lim, lim);
++    }
++
+     input_report_rel(dev, INPUT_REL_X, dx, false, K_FOREVER);
+     input_report_rel(dev, INPUT_REL_Y, dy, true, K_FOREVER);
+ 
++    /*
++     * Track whether the pad is actually clear. A timer alone is not enough: in
++     * relative mode a finger resting motionless generates no packets, so "no
++     * packets for N ms" reads identically to "no finger", and recalibrating
++     * then calibrates the finger into the baseline - which is exactly how the
++     * first attempt at idle recalibration made things worse rather than better.
++     *
++     * PINNACLE_Z_IDLE is set to 5 at init, so the chip emits a short run of
++     * all-zero packets when the finger leaves. That run is a positive lift
++     * signal; any real movement clears it again.
++     */
++    if (dx == 0 && dy == 0 && btn == 0) {
++        if (data->zero_run < UINT8_MAX) {
++            data->zero_run++;
++        }
++        if (data->zero_run >= PINNACLE_LIFT_ZERO_PACKETS) {
++            data->saw_lift = true;
++        }
++    } else {
++        data->zero_run = 0;
++        data->saw_lift = false;
++    }
++
++    /* Push the idle recalibration out; it must only fire with no finger down,
++     * or the finger itself gets calibrated into the baseline. */
++    if (config->recalibrate_idle_ms > 0) {
++        k_work_reschedule(&data->recal_work, K_MSEC(config->recalibrate_idle_ms));
++    }
++
+     return;
+ }
+ 
++static int pinnacle_force_recalibrate(const struct device *dev);
++
++static void pinnacle_recal_work_cb(struct k_work *work) {
++    struct k_work_delayable *dwork = k_work_delayable_from_work(work);
++    struct pinnacle_data *data = CONTAINER_OF(dwork, struct pinnacle_data, recal_work);
++    if (!data->saw_lift) {
++        LOG_DBG("Skipping idle recalibration, no lift seen");
++        return;
++    }
++
++    LOG_DBG("Idle recalibration");
++    pinnacle_force_recalibrate(data->dev);
++}
++
+ static void pinnacle_work_cb(struct k_work *work) {
+     struct pinnacle_data *data = CONTAINER_OF(work, struct pinnacle_data, work);
+     pinnacle_report_data(data->dev);
+@@ -390,11 +446,28 @@ static int pinnacle_force_recalibrate(const struct device *dev) {
+         LOG_ERR("Failed to force calibration %d", ret);
+     }
+ 
+-    do {
+-        pinnacle_seq_read(dev, PINNACLE_CAL_CFG, &val, 1);
+-    } while (val & 0x01);
++    /*
++     * Wait for the chip to clear the calibrate bit. Upstream spins on this with
++     * the read's return value ignored: if the I2C read fails, `val` keeps its
++     * previous contents - which still have bit 0 set, because we just set it -
++     * and the loop never exits. That hangs the workqueue thread this runs on,
++     * which is also the thread feeding the split link, so a single bus glitch
++     * takes the whole half down. Bound it and yield between polls.
++     */
++    for (int i = 0; i < PINNACLE_RECALIBRATE_POLL_MAX; i++) {
++        int poll_ret = pinnacle_seq_read(dev, PINNACLE_CAL_CFG, &val, 1);
++        if (poll_ret < 0) {
++            LOG_ERR("Failed to poll cal config %d", poll_ret);
++            return poll_ret;
++        }
++        if (!(val & PINNACLE_CAL_CFG_CALIBRATE)) {
++            return ret;
++        }
++        k_msleep(1);
++    }
+ 
+-    return ret;
++    LOG_WRN("Recalibration did not complete in %d ms", PINNACLE_RECALIBRATE_POLL_MAX);
++    return -ETIMEDOUT;
+ }
+ 
+ int pinnacle_set_sleep(const struct device *dev, bool enabled) {
+@@ -465,6 +538,40 @@ static int pinnacle_init(const struct device *dev) {
+         LOG_ERR("Failed to tune edge sensitivity %d", ret);
+         return ret;
+     }
++    /*
++     * Automatic compensation. The chip powers up with all five enables set
++     * (CAL_CFG = 0x3e, measured). Background comp is what recovers tracking
++     * after the pad is left alone for a few seconds - keep it. Track-error and
++     * NERD comp, however, can fire *mid-stroke*, and a compensation applied
++     * while the finger is moving shows up as a single oversized delta.
++     */
++    uint8_t cal_cfg = 0;
++    ret = pinnacle_seq_read(dev, PINNACLE_CAL_CFG, &cal_cfg, 1);
++    if (ret < 0) {
++        LOG_ERR("Failed to read cal config %d", ret);
++        return ret;
++    }
++    LOG_WRN("PINNACLE CAL_CFG after reset = 0x%02x", cal_cfg);
++
++    uint8_t cal_cfg_new = cal_cfg;
++    if (config->no_track_error_comp) {
++        cal_cfg_new &= ~PINNACLE_CAL_CFG_TRACK_ERROR_COMP;
++    }
++    if (config->no_nerd_comp) {
++        cal_cfg_new &= ~PINNACLE_CAL_CFG_NERD_COMP;
++    }
++    /* Never write the calibrate bit here; pinnacle_force_recalibrate owns it. */
++    cal_cfg_new &= ~PINNACLE_CAL_CFG_CALIBRATE;
++
++    if (cal_cfg_new != cal_cfg) {
++        ret = pinnacle_write(dev, PINNACLE_CAL_CFG, cal_cfg_new);
++        if (ret < 0) {
++            LOG_ERR("Failed to write cal config %d", ret);
++            return ret;
++        }
++        LOG_WRN("PINNACLE CAL_CFG set to 0x%02x", cal_cfg_new);
++    }
++
+     ret = pinnacle_force_recalibrate(dev);
+     if (ret < 0) {
+         LOG_ERR("Failed to force recalibration %d", ret);
+@@ -482,12 +589,21 @@ static int pinnacle_init(const struct device *dev) {
+     ret = pinnacle_seq_read(dev, PINNACLE_SLEEP_INTERVAL, packet, 1);
+ 
+     if (ret >= 0) {
+-        LOG_DBG("Default sleep interval %d", packet[0]);
++        LOG_WRN("PINNACLE SLEEP_INTERVAL after reset = %d", packet[0]);
+     }
+ 
+-    ret = pinnacle_write(dev, PINNACLE_SLEEP_INTERVAL, 255);
+-    if (ret <= 0) {
+-        LOG_DBG("Failed to update sleep interaval %d", ret);
++    /*
++     * Upstream wrote 255 here unconditionally. That is how often the sleeping
++     * chip wakes to look for a finger, and at 255 the pad looks dead once
++     * sleep is on. Only write it when the devicetree asks; otherwise keep the
++     * chip's power-on value.
++     */
++    if (config->sleep_interval >= 0) {
++        ret = pinnacle_write(dev, PINNACLE_SLEEP_INTERVAL, config->sleep_interval);
++        if (ret < 0) {
++            LOG_ERR("Failed to update sleep interval %d", ret);
++            return ret;
++        }
+     }
+ 
+     uint8_t feed_cfg2 = PINNACLE_FEED_CFG2_EN_IM | PINNACLE_FEED_CFG2_EN_BTN_SCRL;
+@@ -502,6 +618,10 @@ static int pinnacle_init(const struct device *dev) {
+     if (config->rotate_90) {
+         feed_cfg2 |= PINNACLE_FEED_CFG2_ROTATE_90;
+     }
++
++    if (config->no_glide_extend) {
++        feed_cfg2 |= PINNACLE_FEED_CFG2_DIS_GE;
++    }
+     ret = pinnacle_write(dev, PINNACLE_FEED_CFG2, feed_cfg2);
+     if (ret < 0) {
+         LOG_ERR("can't write %d", ret);
+@@ -536,6 +656,7 @@ static int pinnacle_init(const struct device *dev) {
+     }
+ 
+     k_work_init(&data->work, pinnacle_work_cb);
++    k_work_init_delayable(&data->recal_work, pinnacle_recal_work_cb);
+ 
+     pinnacle_write(dev, PINNACLE_FEED_CFG1, feed_cfg1);
+ 
+@@ -571,11 +692,17 @@ static int pinnacle_pm_action(const struct device *dev, enum pm_device_action ac
+                                                          0)},                                      \
+                      .seq_read = pinnacle_spi_seq_read, .write = pinnacle_spi_write)),             \
+         .rotate_90 = DT_INST_PROP(n, rotate_90),                                                   \
++        .no_glide_extend = DT_INST_PROP(n, no_glide_extend),                                                   \
+         .x_invert = DT_INST_PROP(n, x_invert),                                                     \
+         .y_invert = DT_INST_PROP(n, y_invert),                                                     \
+         .sleep_en = DT_INST_PROP(n, sleep),                                                        \
+         .no_taps = DT_INST_PROP(n, no_taps),                                                       \
+         .no_secondary_tap = DT_INST_PROP(n, no_secondary_tap),                                     \
++        .recalibrate_idle_ms = DT_INST_PROP_OR(n, recalibrate_idle_ms, 0),                          \
++        .max_delta = DT_INST_PROP_OR(n, max_delta, 0),                                             \
++        .sleep_interval = DT_INST_PROP_OR(n, sleep_interval, -1),                                  \
++        .no_track_error_comp = DT_INST_PROP(n, no_track_error_comp),                               \
++        .no_nerd_comp = DT_INST_PROP(n, no_nerd_comp),                                             \
+         .x_axis_z_min = DT_INST_PROP_OR(n, x_axis_z_min, 5),                                       \
+         .y_axis_z_min = DT_INST_PROP_OR(n, y_axis_z_min, 4),                                       \
+         .sensitivity = DT_INST_ENUM_IDX_OR(n, sensitivity, PINNACLE_SENSITIVITY_1X),               \
+diff --git a/drivers/input/input_pinnacle.h b/drivers/input/input_pinnacle.h
+index ed22e42..c37f6ad 100644
+--- a/drivers/input/input_pinnacle.h
++++ b/drivers/input/input_pinnacle.h
+@@ -39,6 +39,19 @@
+ #define PINNACLE_FEED_CFG2_EN_BTN_SCRL BIT(6) // Enable Button Scroll
+ #define PINNACLE_FEED_CFG2_ROTATE_90 BIT(7)   // Swap X & Y
+ #define PINNACLE_CAL_CFG 0x07                 // Contains calibration configuration bits.
++/* CalConfig1 bits. Names/values cross-checked against QMK's
++ * drivers/sensors/cirque_pinnacle_regdefs.h. The chip powers up with all five
++ * compensation enables set (0x3e), measured on this pad. */
++#define PINNACLE_CAL_CFG_CALIBRATE BIT(0)
++/* Recalibration takes ~100ms on this part; cap the poll well above that. */
++#define PINNACLE_RECALIBRATE_POLL_MAX 500
++/* Z_IDLE is programmed to 5; require most of that run before trusting a lift. */
++#define PINNACLE_LIFT_ZERO_PACKETS 3
++#define PINNACLE_CAL_CFG_BACKGROUND_COMP BIT(1)
++#define PINNACLE_CAL_CFG_NERD_COMP BIT(2)
++#define PINNACLE_CAL_CFG_TRACK_ERROR_COMP BIT(3)
++#define PINNACLE_CAL_CFG_TAP_COMP BIT(4)
++#define PINNACLE_CAL_CFG_PALM_ERROR_COMP BIT(5)
+ #define PINNACLE_PS2_AUX 0x08                 // Contains Data register for PS/2 Aux Control.
+ #define PINNACLE_SAMPLE 0x09                  // Sample Rate Number of samples generated per second.
+ #define PINNACLE_Z_IDLE 0x0A         // Number of Z=0 packets sent when Z goes from >0 to 0.
+@@ -75,9 +88,16 @@
+ struct pinnacle_data {
+     uint8_t btn_cache;
+     bool in_int;
++    /* Lift detection - see pinnacle_report_data. The chip emits Z_IDLE all-zero
++     * packets when the finger leaves, which is the only way to tell "pad is
++     * clear" from "finger resting still" in relative mode: both produce no
++     * motion, so neither produces packets. */
++    uint8_t zero_run;
++    bool saw_lift;
+     const struct device *dev;
+     struct gpio_callback gpio_cb;
+     struct k_work work;
++    struct k_work_delayable recal_work;
+ };
+ 
+ enum pinnacle_sensitivity {
+@@ -100,9 +120,13 @@ struct pinnacle_config {
+     pinnacle_seq_read_t seq_read;
+     pinnacle_write_t write;
+ 
+-    bool rotate_90, sleep_en, no_taps, no_secondary_tap, x_invert, y_invert;
++    bool rotate_90, sleep_en, no_taps, no_secondary_tap, no_glide_extend, x_invert, y_invert;
++    bool no_track_error_comp, no_nerd_comp;
+     enum pinnacle_sensitivity sensitivity;
+     uint8_t x_axis_z_min, y_axis_z_min;
++    uint32_t recalibrate_idle_ms;
++    uint8_t max_delta;
++    int16_t sleep_interval;
+     const struct gpio_dt_spec dr;
+ };
+ 
+diff --git a/dts/bindings/input/cirque,pinnacle-common.yaml b/dts/bindings/input/cirque,pinnacle-common.yaml
+index caefe3e..b7d8e7c 100644
+--- a/dts/bindings/input/cirque,pinnacle-common.yaml
++++ b/dts/bindings/input/cirque,pinnacle-common.yaml
+@@ -14,6 +14,16 @@ properties:
+     type: boolean
+   no-taps:
+     type: boolean
++  no-glide-extend:
++    type: boolean
++  recalibrate-idle-ms:
++    type: int
++    default: 0
++    description: |
++      Re-run the sensor's calibration after this many milliseconds with no
++      touch activity. The Pinnacle only calibrates at init, and its baseline
++      drifts with temperature, humidity and anything curing near the sensor,
++      after which tracking degrades until the board is reset. 0 disables.
+   sensitivity:
+     type: string
+     enum:
+@@ -29,3 +39,27 @@ properties:
+     type: int
+     default: 4
+ 
++  sleep-interval:
++    type: int
++    description: |
++      Value written to the SleepInterval register (0x0C), how often the chip
++      wakes from sleep to look for a finger. Unset leaves the power-on value.
++      Upstream forced 255, which makes the pad unresponsive with sleep on.
++
++  max-delta:
++    type: int
++    description: |
++      Clamp each sample's X/Y delta to +/- this many counts (0 = no clamp).
++      Guards against a single outlier sample being amplified into a screen-wide
++      jump by the host's pointer acceleration curve.
++
++  no-track-error-comp:
++    type: boolean
++    description: |
++      Clear CalConfig1 TRACK_ERROR_COMP_ENABLE. Track-error compensation can
++      fire mid-stroke, and the correction appears as one oversized delta.
++
++  no-nerd-comp:
++    type: boolean
++    description: |
++      Clear CalConfig1 NERD_COMP_ENABLE (noise/ESD/recalibration detection).

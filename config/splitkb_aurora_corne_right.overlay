@@ -1,0 +1,9 @@
+#include "splitkb_aurora_corne.dtsi"
+
+&glidepoint {
+    status = "okay";
+};
+
+&glidepoint_split {
+    status = "okay";
+};
