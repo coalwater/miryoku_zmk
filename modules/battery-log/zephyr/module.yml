@@ -1,0 +1,4 @@
+name: battery_log
+build:
+  cmake: .
+  kconfig: Kconfig

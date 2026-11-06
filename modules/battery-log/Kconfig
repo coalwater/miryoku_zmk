@@ -1,0 +1,25 @@
+config ZMK_BATTERY_LOG
+    bool "Periodically log split peripheral battery levels"
+    depends on ZMK_SPLIT_BLE_CENTRAL_BATTERY_LEVEL_FETCHING
+    help
+      ZMK exposes peripheral battery levels only over BLE (the BAS proxy
+      service). A dongle attached to the host over USB HID has no way to
+      report them, so this prints them to the console instead - pair it with
+      the zmk-usb-logging snippet and the levels come out of a CDC ACM port
+      the host can read.
+
+config ZMK_BATTERY_LOG_INTERVAL_S
+    int "Seconds between battery log lines"
+    default 10
+    depends on ZMK_BATTERY_LOG
+
+config ZMK_BATTERY_LOG_LABELS
+    string "Comma-separated name per peripheral slot"
+    default "left,right"
+    depends on ZMK_BATTERY_LOG
+    help
+      Peripheral slots are handed out in connection/bond order and the central
+      never learns which half is which, so the mapping is a local fact, not
+      something the firmware can discover. Slots past the end of this list are
+      logged by number. Verify with: power one half off and watch the log for
+      "Releasing peripheral slot at <n>".
